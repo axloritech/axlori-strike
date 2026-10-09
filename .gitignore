@@ -1,0 +1,13 @@
+node_modules/
+.npm/
+.config/
+.next/
+out/
+build/
+coverage/
+.next/cache/
+.turbo/
+.cache/
+*.tsbuildinfo
+.env*
+.vercel/
