@@ -21,6 +21,7 @@ export interface GameSnapshot {
   aiming: boolean;
   reloading: boolean;
   sprinting: boolean;
+  radarContacts: Array<{ x: number; y: number }>;
 }
 
 export type GameEventType = 'hit' | 'kill' | 'damage' | 'empty' | 'respawn';
@@ -62,6 +63,13 @@ const PLAYER_RADIUS = 0.34;
 const PLAYER_MAX_HEALTH = 100;
 const MAGAZINE_SIZE = 30;
 const RELOAD_DURATION = 1.48;
+const JOYSTICK_DEAD_ZONE = 0.08;
+const SPRINT_THRESHOLD = 0.85;
+const WALK_SPEED = 4.55;
+const SPRINT_SPEED = 8.05;
+const AIM_SPEED = 3.15;
+const SLIDE_DURATION = 0.64;
+const SLIDE_COOLDOWN = 0.42;
 const CENTER_NDC = new THREE.Vector2(0, 0);
 const ENEMY_SPAWNS: ReadonlyArray<THREE.Vector2> = [
   new THREE.Vector2(-8.2, -2.2),
@@ -89,7 +97,9 @@ export class ArenaGame {
   private readonly boxGeometry = new THREE.BoxGeometry(1, 1, 1);
   private readonly unitCylinder = new THREE.CylinderGeometry(0.5, 0.5, 1, 8);
   private readonly enemyCapsule = new THREE.CapsuleGeometry(0.1, 0.42, 2, 6);
+  private readonly handCapsule = new THREE.CapsuleGeometry(0.075, 0.3, 2, 5);
   private readonly headGeometry = new THREE.DodecahedronGeometry(0.22, 0);
+  private readonly shadowGeometry = new THREE.PlaneGeometry(1, 1);
   private readonly soundManager = new SoundManager();
 
   private renderer!: THREE.WebGLRenderer;
@@ -115,7 +125,7 @@ export class ArenaGame {
   private walkPhase = 0;
   private elapsedTime = 0;
   private aiming = false;
-  private sprintToggle = false;
+  private sprinting = false;
   private fireHeld = false;
   private mouseLooking = false;
   private mouseLastX = 0;
@@ -125,6 +135,7 @@ export class ArenaGame {
   private moveStickY = 0;
   private slideTimer = 0;
   private slideCooldown = 0;
+  private slideSpeed = 6.8;
   private slideDirection = new THREE.Vector3();
   private shotCooldown = 0;
   private reloadTimer = 0;
@@ -149,20 +160,29 @@ export class ArenaGame {
   private magazineGroup!: THREE.Group;
   private muzzleFlash!: THREE.Group;
   private tracerLine!: THREE.Line<THREE.BufferGeometry, THREE.LineBasicMaterial>;
+  private hitSpark!: THREE.Mesh<THREE.OctahedronGeometry, THREE.MeshBasicMaterial>;
+  private hitSparkTimer = 0;
   private muzzleTimerMax = 0.07;
 
   private readonly material = {
-    ground: new THREE.MeshStandardMaterial({ color: 0x32453c, roughness: 1, flatShading: true }),
-    wall: new THREE.MeshStandardMaterial({ color: 0x56645e, roughness: 0.96, flatShading: true }),
-    wallDark: new THREE.MeshStandardMaterial({ color: 0x303d39, roughness: 1, flatShading: true }),
-    cover: new THREE.MeshStandardMaterial({ color: 0x697666, roughness: 0.94, flatShading: true }),
-    coverDark: new THREE.MeshStandardMaterial({ color: 0x46554c, roughness: 0.95, flatShading: true }),
-    crate: new THREE.MeshStandardMaterial({ color: 0x98875f, roughness: 1, flatShading: true }),
-    crateDark: new THREE.MeshStandardMaterial({ color: 0x575343, roughness: 1, flatShading: true }),
-    accent: new THREE.MeshStandardMaterial({ color: 0xe6a34f, roughness: 0.7, metalness: 0.12, flatShading: true }),
-    gun: new THREE.MeshStandardMaterial({ color: 0x202b2a, roughness: 0.54, metalness: 0.55, flatShading: true }),
-    gunDark: new THREE.MeshStandardMaterial({ color: 0x111a1b, roughness: 0.72, metalness: 0.36, flatShading: true }),
-    gunAccent: new THREE.MeshStandardMaterial({ color: 0x879286, roughness: 0.45, metalness: 0.54, flatShading: true }),
+    ground: new THREE.MeshStandardMaterial({ color: 0x69747e, roughness: 1, flatShading: true }),
+    wall: new THREE.MeshStandardMaterial({ color: 0x74818d, roughness: 0.96, flatShading: true }),
+    wallDark: new THREE.MeshStandardMaterial({ color: 0x263648, roughness: 0.94, metalness: 0.12, flatShading: true }),
+    cover: new THREE.MeshStandardMaterial({ color: 0x8c969e, roughness: 0.92, flatShading: true }),
+    coverDark: new THREE.MeshStandardMaterial({ color: 0x4a5968, roughness: 0.92, flatShading: true }),
+    crate: new THREE.MeshStandardMaterial({ color: 0x755d48, roughness: 1, flatShading: true }),
+    crateDark: new THREE.MeshStandardMaterial({ color: 0x483d34, roughness: 1, flatShading: true }),
+    accent: new THREE.MeshStandardMaterial({ color: 0x30b8f4, roughness: 0.56, metalness: 0.24, flatShading: true }),
+    steel: new THREE.MeshStandardMaterial({ color: 0x3c6481, roughness: 0.66, metalness: 0.42, flatShading: true }),
+    steelDark: new THREE.MeshStandardMaterial({ color: 0x294459, roughness: 0.7, metalness: 0.36, flatShading: true }),
+    glass: new THREE.MeshStandardMaterial({ color: 0x263f55, roughness: 0.3, metalness: 0.3, emissive: 0x11263a, emissiveIntensity: 0.45, flatShading: true }),
+    concreteLight: new THREE.MeshStandardMaterial({ color: 0xa9b1b8, roughness: 0.92, flatShading: true }),
+    gun: new THREE.MeshStandardMaterial({ color: 0x344755, roughness: 0.48, metalness: 0.56, flatShading: true }),
+    gunDark: new THREE.MeshStandardMaterial({ color: 0x182634, roughness: 0.66, metalness: 0.36, flatShading: true }),
+    gunAccent: new THREE.MeshStandardMaterial({ color: 0x879cab, roughness: 0.4, metalness: 0.52, flatShading: true }),
+    glove: new THREE.MeshStandardMaterial({ color: 0x273646, roughness: 0.9, metalness: 0.02, flatShading: true }),
+    gloveEdge: new THREE.MeshStandardMaterial({ color: 0x596e80, roughness: 0.78, metalness: 0.04, flatShading: true }),
+    shadow: new THREE.MeshBasicMaterial({ color: 0x111b29, transparent: true, opacity: 0.18, depthWrite: false }),
   };
 
   private readonly onResize = (): void => this.resize();
@@ -209,6 +229,7 @@ export class ArenaGame {
     this.createEnemies();
     this.createWeapon();
     this.createTracer();
+    this.createImpactEffect();
     this.camera.position.set(this.playerX, this.eyeHeight, this.playerZ);
     this.camera.rotation.order = 'YXZ';
     this.resize();
@@ -240,82 +261,301 @@ export class ArenaGame {
       depth: true,
       precision: 'mediump',
     });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.4));
+    const coarsePointer = window.matchMedia?.('(pointer: coarse)').matches || navigator.maxTouchPoints > 0;
+    this.renderer.shadowMap.enabled = !coarsePointer;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
-    this.renderer.setClearColor(0x111b1a, 1);
+    this.renderer.toneMappingExposure = 1.16;
+    this.renderer.setClearColor(0x719cc5, 1);
+  }
+
+  private addSkyDome(): void {
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 256;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+
+    const gradient = context.createLinearGradient(0, 0, 0, canvas.height);
+    gradient.addColorStop(0, '#4b78a5');
+    gradient.addColorStop(0.42, '#78a6ce');
+    gradient.addColorStop(0.76, '#a7c3d8');
+    gradient.addColorStop(1, '#769dbd');
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+
+    // A few diffuse cloud strokes add a hint of daylight texture without external assets.
+    context.save();
+    context.filter = 'blur(19px)';
+    context.fillStyle = 'rgba(250, 253, 255, 0.22)';
+    for (let cloud = 0; cloud < 15; cloud += 1) {
+      const cx = (cloud * 83 + 37) % canvas.width;
+      const cy = 38 + ((cloud * 47 + 19) % 117);
+      const rx = 18 + ((cloud * 17) % 30);
+      const ry = 5 + ((cloud * 7) % 9);
+      context.beginPath();
+      context.ellipse(cx, cy, rx, ry, -0.08, 0, Math.PI * 2);
+      context.fill();
+      if (cloud % 3 === 0) {
+        context.beginPath();
+        context.ellipse(cx + rx * 0.58, cy + 2, rx * 0.56, ry * 0.72, 0.05, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+    context.restore();
+
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.mapping = THREE.EquirectangularReflectionMapping;
+    texture.wrapS = THREE.ClampToEdgeWrapping;
+    texture.needsUpdate = true;
+    this.scene.background = texture;
   }
 
   private buildScene(): void {
-    this.scene.background = new THREE.Color(0x111b1a);
-    this.scene.fog = new THREE.Fog(0x111b1a, 22, 54);
+    this.scene.background = new THREE.Color(0x719cc5);
+    this.scene.fog = new THREE.Fog(0x719cc5, 29, 78);
+    this.addSkyDome();
     this.scene.add(this.world);
 
-    const hemisphere = new THREE.HemisphereLight(0xc5d4bf, 0x1c2823, 1.8);
+    const hemisphere = new THREE.HemisphereLight(0xe1efff, 0x283542, 1.88);
     this.scene.add(hemisphere);
-    const keyLight = new THREE.DirectionalLight(0xffd9ae, 2.45);
-    keyLight.position.set(-9, 17, 8);
+    const keyLight = new THREE.DirectionalLight(0xffecd4, 2.38);
+    keyLight.position.set(-10, 18, 9);
+    keyLight.castShadow = this.renderer.shadowMap.enabled;
+    keyLight.shadow.mapSize.set(512, 512);
+    keyLight.shadow.camera.left = -25;
+    keyLight.shadow.camera.right = 25;
+    keyLight.shadow.camera.top = 25;
+    keyLight.shadow.camera.bottom = -25;
+    keyLight.shadow.camera.near = 1;
+    keyLight.shadow.camera.far = 46;
+    keyLight.shadow.bias = -0.00035;
+    keyLight.shadow.normalBias = 0.035;
+    keyLight.shadow.camera.updateProjectionMatrix();
     this.scene.add(keyLight);
-    const fillLight = new THREE.DirectionalLight(0x96b8ad, 0.82);
+    const fillLight = new THREE.DirectionalLight(0x83b7e7, 0.88);
     fillLight.position.set(12, 8, -13);
     this.scene.add(fillLight);
 
-    const floor = new THREE.Mesh(
-      new THREE.PlaneGeometry(36, 36, 1, 1),
-      this.material.ground,
-    );
+    const floor = new THREE.Mesh(new THREE.PlaneGeometry(36, 36), this.material.ground);
     floor.rotation.x = -Math.PI / 2;
     floor.position.y = -0.035;
-    floor.receiveShadow = false;
+    floor.receiveShadow = this.renderer.shadowMap.enabled;
     this.world.add(floor);
 
-    const grid = new THREE.GridHelper(36, 36, 0x759084, 0x566b60);
+    const grid = new THREE.GridHelper(36, 18, 0x7a9ab3, 0x6c8192);
     grid.position.y = 0.004;
     const gridMaterials = Array.isArray(grid.material) ? grid.material : [grid.material];
     for (const gridMaterial of gridMaterials) {
       const lineMaterial = gridMaterial as THREE.LineBasicMaterial;
       lineMaterial.transparent = true;
-      lineMaterial.opacity = 0.22;
+      lineMaterial.opacity = 0.12;
       lineMaterial.depthWrite = false;
     }
     this.world.add(grid);
 
-    // Closed perimeter. Player bounds are clamped just inside these walls.
-    this.addBox(-ARENA_HALF, 2.15, 0, 0.7, 4.3, 36, this.material.wall);
-    this.addBox(ARENA_HALF, 2.15, 0, 0.7, 4.3, 36, this.material.wall);
-    this.addBox(0, 2.15, -ARENA_HALF, 36, 4.3, 0.7, this.material.wall);
-    this.addBox(0, 2.15, ARENA_HALF, 36, 4.3, 0.7, this.material.wall);
+    // Concrete perimeter, steel kick plates and restrained blue lane lighting.
+    this.addBox(-ARENA_HALF, 2.35, 0, 0.7, 4.7, 36, this.material.wall);
+    this.addBox(ARENA_HALF, 2.35, 0, 0.7, 4.7, 36, this.material.wall);
+    this.addBox(0, 2.35, -ARENA_HALF, 36, 4.7, 0.7, this.material.wall);
+    this.addBox(0, 2.35, ARENA_HALF, 36, 4.7, 0.7, this.material.wall);
+    this.addBox(0, 0.34, -17.57, 35, 0.68, 0.035, this.material.wallDark);
+    this.addBox(0, 0.34, 17.57, 35, 0.68, 0.035, this.material.wallDark);
+    this.addBox(-17.57, 0.34, 0, 0.035, 0.68, 35, this.material.wallDark);
+    this.addBox(17.57, 0.34, 0, 0.035, 0.68, 35, this.material.wallDark);
+    this.addBox(0, 0.78, -17.53, 34.7, 0.035, 0.055, this.material.accent);
+    this.addBox(0, 0.78, 17.53, 34.7, 0.035, 0.055, this.material.accent);
+    this.addBox(-17.53, 0.78, 0, 0.055, 0.035, 34.7, this.material.accent);
+    this.addBox(17.53, 0.78, 0, 0.055, 0.035, 34.7, this.material.accent);
+    for (const seam of [-15, -10, -5, 5, 10, 15]) {
+      this.addBox(seam, 2.25, -17.59, 0.075, 3.35, 0.08, this.material.coverDark);
+      this.addBox(seam, 4.0, -17.56, 0.28, 0.1, 0.1, this.material.steel);
+      this.addBox(-17.59, 2.25, seam, 0.08, 3.35, 0.075, this.material.coverDark);
+      this.addBox(17.59, 2.25, seam, 0.08, 3.35, 0.075, this.material.coverDark);
+    }
 
-    // Dark lower wall banding and warm safety strips provide readable depth cues.
-    this.addBox(0, 0.28, -17.57, 35, 0.56, 0.035, this.material.wallDark);
-    this.addBox(0, 0.28, 17.57, 35, 0.56, 0.035, this.material.wallDark);
-    this.addBox(-17.57, 0.28, 0, 0.035, 0.56, 35, this.material.wallDark);
-    this.addBox(17.57, 0.28, 0, 0.035, 0.56, 35, this.material.wallDark);
-    this.addBox(0, 0.74, -17.55, 34.6, 0.035, 0.055, this.material.accent);
-    this.addBox(0, 0.74, 17.55, 34.6, 0.035, 0.055, this.material.accent);
-    this.addBox(-17.55, 0.74, 0, 0.055, 0.035, 34.6, this.material.accent);
-    this.addBox(17.55, 0.74, 0, 0.055, 0.035, 34.6, this.material.accent);
+    // Two shallow barracks facades give the arena a readable industrial skyline.
+    this.addTrainingBuilding(-12.2, -14.35, 8.6, 6.0, 5.4);
+    this.addTrainingBuilding(12.2, -14.35, 8.6, 6.0, 5.4);
+    this.addCommandTower();
+    this.addWatchtower(-14.0, -8.0);
+    this.addWatchtower(14.0, -8.0);
 
-    // Low cover leaves open lanes through the middle of the training yard.
-    this.addCover(-11.1, 0.63, 0.2, 3.1, 1.26, 1.25, this.material.cover);
-    this.addCover(11.2, 0.63, -1.4, 3.1, 1.26, 1.25, this.material.cover);
+    // Ribbed cargo containers and concrete cover frame a clear central firing lane.
+    this.addShippingContainer(-11.1, 0.25, 5.2, 2.6);
+    this.addShippingContainer(11.2, -1.4, 5.2, 2.6);
     this.addCover(-5.8, 0.75, -3.9, 2.15, 1.5, 2.15, this.material.crate);
     this.addCover(6.0, 0.75, 3.0, 2.15, 1.5, 2.15, this.material.crate);
+    this.addJerseyBarrier(-2.4, 1.0, 2.8, 0.72);
+    this.addJerseyBarrier(3.6, -5.6, 2.8, 0.72);
     this.addCover(-2.1, 0.54, 6.1, 2.6, 1.08, 0.95, this.material.coverDark);
     this.addCover(8.5, 0.48, 7.1, 2.2, 0.96, 1.0, this.material.coverDark);
     this.addCover(-9.2, 0.58, -10.3, 2.6, 1.16, 1.3, this.material.coverDark);
     this.addCover(10.5, 0.58, -10.2, 2.6, 1.16, 1.3, this.material.coverDark);
 
-    // Small training structures, kept against the edges so combat lanes stay clear.
+    // A low guard post and angled training ramp occupy the perimeter, not the sightline.
     this.addCover(-14.2, 1.22, 8.6, 3.1, 2.44, 2.8, this.material.wallDark);
     this.addBox(-14.2, 2.55, 8.6, 3.45, 0.22, 3.15, this.material.cover);
-    this.addCover(14.1, 1.13, -7.9, 2.9, 2.26, 3.2, this.material.wallDark);
-    this.addBox(14.1, 2.35, -7.9, 3.2, 0.2, 3.5, this.material.cover);
-
+    this.addRamp(-10.9, 8.0, 3.6, 2.7, 0.58);
     this.addCrateStack(-7.9, 4.0);
     this.addCrateStack(8.0, -0.1);
     this.addLaneMarkings();
+  }
+
+  private addCommandTower(): void {
+    const x = 0;
+    const z = -16.25;
+    const width = 5.6;
+    const height = 7.9;
+    const depth = 2.8;
+    const front = z + depth / 2;
+    this.addCover(x, height / 2, z, width, height, depth, this.material.steelDark);
+    this.addBox(x, height + 0.13, z, width + 0.4, 0.26, depth + 0.28, this.material.wallDark);
+    this.addBox(x - 2.55, 3.75, front + 0.07, 0.16, 7.35, 0.18, this.material.steel);
+    this.addBox(x + 2.55, 3.75, front + 0.07, 0.16, 7.35, 0.18, this.material.steel);
+    this.addBox(x, 1.55, front + 0.075, 3.42, 2.3, 0.16, this.material.wallDark);
+    this.addBox(x, 1.62, front + 0.17, 2.76, 1.72, 0.045, this.material.steel);
+    this.addBox(x, 2.52, front + 0.2, 2.88, 0.08, 0.05, this.material.accent);
+    for (const side of [-1, 1]) {
+      const windowX = x + side * 1.48;
+      this.addBox(windowX, 4.45, front + 0.06, 1.12, 0.95, 0.12, this.material.wallDark);
+      this.addBox(windowX, 4.45, front + 0.14, 0.86, 0.62, 0.045, this.material.glass);
+      this.addBox(windowX, 6.15, front + 0.06, 1.5, 0.78, 0.12, this.material.wallDark);
+      this.addBox(windowX, 6.15, front + 0.14, 1.18, 0.5, 0.045, this.material.glass);
+    }
+    this.addBox(x, 7.35, front + 0.12, 4.9, 0.14, 0.18, this.material.steel);
+    this.addBox(x - 1.72, 8.57, z - 0.08, 1.24, 1.08, 1.36, this.material.coverDark);
+    this.addBox(x - 1.72, 8.62, z + 0.62, 0.86, 0.48, 0.08, this.material.glass);
+    this.addBox(x - 1.72, 9.14, z - 0.08, 1.48, 0.12, 1.58, this.material.wallDark);
+    this.addBox(x + 0.2, 8.8, z, 0.08, 1.35, 0.08, this.material.steel);
+    this.addBox(x + 0.2, 9.48, z, 0.56, 0.08, 0.08, this.material.accent);
+    for (let rung = 0; rung < 7; rung += 1) {
+      this.addBox(x + 2.95, 0.5 + rung * 0.49, front + 0.19, 0.55, 0.05, 0.1, this.material.concreteLight);
+    }
+  }
+
+  private addTrainingBuilding(x: number, z: number, width: number, height: number, depth: number): void {
+    const front = z + depth / 2;
+    const lowerWindowY = height * 0.39;
+    const upperWindowY = height * 0.75;
+    this.addCover(x, height / 2, z, width, height, depth, this.material.coverDark);
+    this.addBox(x, height + 0.11, z, width + 0.32, 0.22, depth + 0.26, this.material.wallDark);
+    this.addBox(x, 0.45, front + 0.025, width - 0.18, 0.24, 0.08, this.material.wallDark);
+    this.addBox(x, 1.35, front + 0.04, 1.18, 1.32, 0.08, this.material.steelDark);
+    this.addBox(x, 1.29, front + 0.09, 0.74, 1.04, 0.035, this.material.glass);
+    this.addBox(x, 1.95, front + 0.11, 0.8, 0.055, 0.04, this.material.accent);
+
+    for (const side of [-1, 1]) {
+      const wingX = x + side * width * 0.29;
+      this.addBox(wingX, lowerWindowY, front + 0.035, 1.36, 1.0, 0.08, this.material.steelDark);
+      this.addBox(wingX, lowerWindowY, front + 0.085, 1.06, 0.69, 0.035, this.material.glass);
+      this.addBox(wingX, upperWindowY, front + 0.035, 1.62, 0.84, 0.08, this.material.wallDark);
+      this.addBox(wingX, upperWindowY, front + 0.085, 1.28, 0.55, 0.035, this.material.glass);
+      this.addBox(wingX - side * 0.83, height / 2, front + 0.04, 0.12, height - 0.42, 0.12, this.material.concreteLight);
+      this.addBox(wingX, lowerWindowY - 0.55, front + 0.1, 1.45, 0.055, 0.08, this.material.steel);
+    }
+
+    this.addBox(x, height - 0.28, front + 0.12, width - 0.6, 0.12, 0.18, this.material.steel);
+    this.addBox(x - width * 0.28, height + 0.43, z, 0.16, 0.42, depth - 0.2, this.material.steelDark);
+    this.addBox(x + width * 0.28, height + 0.43, z, 0.16, 0.42, depth - 0.2, this.material.steelDark);
+    this.addBox(x, height + 0.48, z, width * 0.42, 0.08, 0.08, this.material.accent);
+  }
+
+  private addShippingContainer(x: number, z: number, width: number, height: number): void {
+    const depth = 2.6;
+    const front = z + depth / 2;
+    this.addBox(x, height / 2, z, width, height, depth, this.material.steel);
+    this.colliders.push({
+      minX: x - width / 2,
+      maxX: x + width / 2,
+      minZ: z - depth / 2,
+      maxZ: z + depth / 2,
+    });
+    this.addGroundShadow(x, z, width + 0.75, depth + 0.6);
+    this.addBox(x, height - 0.08, front + 0.045, width - 0.16, 0.12, 0.09, this.material.steelDark);
+    this.addBox(x, 0.09, front + 0.045, width - 0.16, 0.14, 0.09, this.material.steelDark);
+    for (let rib = -2; rib <= 2; rib += 1) {
+      const ribX = x + rib * (width / 5.3);
+      this.addBox(ribX, height / 2, front + 0.06, 0.075, height - 0.24, 0.09, this.material.steelDark);
+    }
+    for (const side of [-1, 1]) {
+      this.addBox(x + side * (width / 2 - 0.1), height / 2, front + 0.09, 0.16, height - 0.08, 0.16, this.material.gunAccent);
+    }
+    this.addBox(x, height / 2, z - depth / 2 - 0.04, width - 0.18, height - 0.16, 0.07, this.material.steelDark);
+    for (let door = -1; door <= 1; door += 2) {
+      this.addBox(x + door * 0.58, height / 2, z - depth / 2 - 0.09, 0.045, height - 0.34, 0.035, this.material.gunAccent);
+      this.addBox(x + door * 0.58, height / 2, z - depth / 2 - 0.12, 0.08, 0.11, 0.05, this.material.accent);
+    }
+  }
+
+  private addWatchtower(x: number, z: number): void {
+    const span = 3.25;
+    const deckHeight = 3.75;
+    for (const offsetX of [-1, 1]) {
+      for (const offsetZ of [-1, 1]) {
+        const px = x + offsetX * 1.35;
+        const pz = z + offsetZ * 1.25;
+        this.addBox(px, deckHeight / 2, pz, 0.22, deckHeight, 0.22, this.material.steelDark);
+        this.colliders.push({ minX: px - 0.19, maxX: px + 0.19, minZ: pz - 0.19, maxZ: pz + 0.19 });
+      }
+    }
+    this.addBox(x, deckHeight, z, span, 0.26, 2.9, this.material.steel);
+    this.addBox(x, deckHeight + 1.0, z - 0.14, 1.82, 1.65, 1.58, this.material.coverDark);
+    this.addBox(x, deckHeight + 1.04, z + 0.68, 1.38, 0.72, 0.08, this.material.glass);
+    this.addBox(x, deckHeight + 1.45, z + 0.74, 1.55, 0.11, 0.1, this.material.accent);
+    this.addBox(x, deckHeight + 1.92, z - 0.14, 2.05, 0.18, 1.82, this.material.wallDark);
+    for (const side of [-1, 1]) {
+      this.addBox(x + side * 1.35, deckHeight + 0.52, z + 0.08, 0.1, 0.8, 2.72, this.material.steelDark);
+      this.addBox(x, deckHeight + 0.52, z + side * 1.22, 2.8, 0.8, 0.1, this.material.steelDark);
+    }
+    for (let rung = 0; rung < 5; rung += 1) {
+      this.addBox(x - 0.72, 0.42 + rung * 0.47, z + 1.53, 0.72, 0.055, 0.12, this.material.concreteLight);
+    }
+  }
+
+  private addJerseyBarrier(x: number, z: number, width: number, depth: number): void {
+    this.addBox(x, 0.19, z, width, 0.38, depth, this.material.concreteLight);
+    this.addBox(x, 0.52, z, width * 0.76, 0.34, depth * 0.72, this.material.cover);
+    this.addBox(x, 0.72, z, width * 0.58, 0.06, depth * 0.56, this.material.accent);
+    this.colliders.push({ minX: x - width / 2, maxX: x + width / 2, minZ: z - depth / 2, maxZ: z + depth / 2 });
+    this.addGroundShadow(x, z, width + 0.45, depth + 0.35);
+  }
+
+  private addRamp(x: number, z: number, width: number, depth: number, height: number): void {
+    const geometry = new THREE.BufferGeometry();
+    const w = width / 2;
+    const d = depth / 2;
+    const positions = new Float32Array([
+      -w, 0, -d, w, 0, -d, w, height, d,
+      -w, 0, -d, w, height, d, -w, height, d,
+      -w, 0, -d, -w, height, d, -w, 0, d,
+      w, 0, -d, w, 0, d, w, height, d,
+      -w, 0, d, -w, height, d, w, height, d,
+      -w, 0, -d, -w, 0, d, w, 0, d,
+      -w, 0, -d, w, 0, d, w, 0, -d,
+    ]);
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geometry.computeVertexNormals();
+    const ramp = new THREE.Mesh(geometry, this.material.coverDark);
+    ramp.position.set(x, 0, z);
+    ramp.castShadow = this.renderer.shadowMap.enabled;
+    ramp.receiveShadow = this.renderer.shadowMap.enabled;
+    this.world.add(ramp);
+    this.colliders.push({ minX: x - w, maxX: x + w, minZ: z - d, maxZ: z + d });
+    this.addGroundShadow(x, z, width + 0.55, depth + 0.6);
+    this.addBox(x, height * 0.5 + 0.05, z + depth * 0.2, width * 0.88, 0.055, 0.12, this.material.accent);
+  }
+
+  private addGroundShadow(x: number, z: number, width: number, depth: number): void {
+    const shadow = new THREE.Mesh(this.shadowGeometry, this.material.shadow);
+    shadow.rotation.x = -Math.PI / 2;
+    shadow.position.set(x, 0.012, z);
+    shadow.scale.set(width, depth, 1);
+    shadow.renderOrder = 1;
+    this.world.add(shadow);
   }
 
   private addBox(
@@ -330,8 +570,8 @@ export class ArenaGame {
     const mesh = new THREE.Mesh(this.boxGeometry, material);
     mesh.position.set(x, y, z);
     mesh.scale.set(width, height, depth);
-    mesh.castShadow = false;
-    mesh.receiveShadow = false;
+    mesh.castShadow = this.renderer.shadowMap.enabled;
+    mesh.receiveShadow = this.renderer.shadowMap.enabled;
     this.world.add(mesh);
     return mesh;
   }
@@ -352,6 +592,7 @@ export class ArenaGame {
       minZ: z - depth / 2,
       maxZ: z + depth / 2,
     });
+    this.addGroundShadow(x, z, width + 0.38, depth + 0.38);
   }
 
   private addCrateStack(x: number, z: number): void {
@@ -361,40 +602,33 @@ export class ArenaGame {
     const second = this.addBox(x + 0.18, 1.38, z - 0.08, 0.86, 0.78, 0.82, this.material.crateDark);
     second.rotation.y = -0.08;
     this.colliders.push({ minX: x - 0.31, maxX: x + 0.67, minZ: z - 0.56, maxZ: z + 0.4 });
-    // Thin battens break up the silhouettes with only a few extra triangles.
-    this.addBox(x, 0.5, z - 0.51, 0.085, 0.96, 0.035, this.material.accent);
-    this.addBox(x - 0.24, 0.5, z - 0.51, 0.055, 0.96, 0.035, this.material.crateDark);
+    this.addGroundShadow(x, z, 1.55, 1.45);
+    // A few raised slats keep the prop legible without high-polygon trim.
+    for (const offsetX of [-0.32, 0.3]) {
+      this.addBox(x + offsetX, 0.5, z - 0.515, 0.055, 0.94, 0.045, this.material.crateDark);
+    }
+    this.addBox(x + 0.18, 1.39, z - 0.505, 0.052, 0.72, 0.045, this.material.accent);
+    this.addBox(x, 0.5, z - 0.52, 1.04, 0.055, 0.048, this.material.coverDark);
   }
 
   private addLaneMarkings(): void {
-    const lineMaterial = new THREE.MeshBasicMaterial({
-      color: 0xc59452,
-      transparent: true,
-      opacity: 0.3,
-      depthWrite: false,
-    });
-    for (const x of [-1, 1]) {
+    const lineMaterial = new THREE.MeshBasicMaterial({ color: 0x4d9fc3, transparent: true, opacity: 0.28, depthWrite: false });
+    for (const x of [-1.3, 1.3]) {
       const line = new THREE.Mesh(this.boxGeometry, lineMaterial);
-      line.position.set(x, 0.012, 0);
-      line.scale.set(0.035, 0.006, 22);
+      line.position.set(x, 0.012, -1.4);
+      line.scale.set(0.035, 0.006, 25);
       this.world.add(line);
     }
     const centerCircle = new THREE.Mesh(
       new THREE.RingGeometry(3.4, 3.48, 36),
-      new THREE.MeshBasicMaterial({
-        color: 0x88a196,
-        transparent: true,
-        opacity: 0.3,
-        side: THREE.DoubleSide,
-        depthWrite: false,
-      }),
+      new THREE.MeshBasicMaterial({ color: 0xaec7d8, transparent: true, opacity: 0.2, side: THREE.DoubleSide, depthWrite: false }),
     );
     centerCircle.rotation.x = -Math.PI / 2;
     centerCircle.position.y = 0.014;
     this.world.add(centerCircle);
     const spawnMark = new THREE.Mesh(
       new THREE.RingGeometry(1.1, 1.17, 24),
-      new THREE.MeshBasicMaterial({ color: 0xe1a257, transparent: true, opacity: 0.42, side: THREE.DoubleSide }),
+      new THREE.MeshBasicMaterial({ color: 0x38bdf4, transparent: true, opacity: 0.5, side: THREE.DoubleSide }),
     );
     spawnMark.rotation.x = -Math.PI / 2;
     spawnMark.position.set(0, 0.016, 10.8);
@@ -411,23 +645,23 @@ export class ArenaGame {
   }
 
   private createEnemy(id: number, x: number, z: number): EnemyBot {
-    const palette = [0xc7553c, 0xd6803e, 0xb84551][id % 3];
+    const palette = [0x46525e, 0x3d4b58, 0x525b64][id % 3];
     const armor = new THREE.MeshStandardMaterial({
       color: palette,
-      roughness: 0.78,
-      metalness: 0.12,
+      roughness: 0.7,
+      metalness: 0.22,
       flatShading: true,
       emissive: 0x000000,
       emissiveIntensity: 0,
     });
-    const darkArmor = new THREE.MeshStandardMaterial({ color: 0x263332, roughness: 0.82, metalness: 0.16, flatShading: true });
-    const joints = new THREE.MeshStandardMaterial({ color: 0x59635b, roughness: 0.7, metalness: 0.24, flatShading: true });
+    const darkArmor = new THREE.MeshStandardMaterial({ color: 0x1d2937, roughness: 0.84, metalness: 0.2, flatShading: true });
+    const joints = new THREE.MeshStandardMaterial({ color: 0x687581, roughness: 0.68, metalness: 0.27, flatShading: true });
     const visorMaterial = new THREE.MeshStandardMaterial({
-      color: 0x311f20,
-      roughness: 0.42,
-      metalness: 0.18,
-      emissive: palette,
-      emissiveIntensity: 1.2,
+      color: 0x341d29,
+      roughness: 0.36,
+      metalness: 0.2,
+      emissive: 0xff394f,
+      emissiveIntensity: 1.35,
     });
     const root = new THREE.Group();
     root.position.set(x, 0, z);
@@ -443,7 +677,7 @@ export class ArenaGame {
       const mesh = new THREE.Mesh(geometry, material);
       mesh.position.copy(position);
       mesh.scale.copy(scale);
-      mesh.castShadow = false;
+      mesh.castShadow = this.renderer.shadowMap.enabled;
       mesh.receiveShadow = false;
       mesh.userData.enemyId = id;
       root.add(mesh);
@@ -453,7 +687,11 @@ export class ArenaGame {
 
     addHitPart(this.boxGeometry, darkArmor, new THREE.Vector3(0, 0.83, 0), new THREE.Vector3(0.47, 0.34, 0.31));
     addHitPart(this.boxGeometry, armor, new THREE.Vector3(0, 1.29, 0), new THREE.Vector3(0.61, 0.68, 0.36));
+    addHitPart(this.boxGeometry, joints, new THREE.Vector3(0, 1.34, -0.198), new THREE.Vector3(0.39, 0.35, 0.055));
+    addHitPart(this.boxGeometry, darkArmor, new THREE.Vector3(-0.38, 1.54, 0), new THREE.Vector3(0.27, 0.24, 0.34));
+    addHitPart(this.boxGeometry, darkArmor, new THREE.Vector3(0.38, 1.54, 0), new THREE.Vector3(0.27, 0.24, 0.34));
     addHitPart(this.headGeometry, armor, new THREE.Vector3(0, 1.83, -0.015), new THREE.Vector3(1, 1, 0.98));
+    addHitPart(this.boxGeometry, darkArmor, new THREE.Vector3(0, 2.035, -0.015), new THREE.Vector3(0.42, 0.11, 0.37));
     addHitPart(this.boxGeometry, visorMaterial, new THREE.Vector3(0, 1.84, -0.204), new THREE.Vector3(0.3, 0.075, 0.04));
     addHitPart(this.boxGeometry, darkArmor, new THREE.Vector3(0, 1.62, -0.04), new THREE.Vector3(0.48, 0.12, 0.33));
 
@@ -462,7 +700,7 @@ export class ArenaGame {
       pivot.position.set(px, py, 0);
       const limb = new THREE.Mesh(this.enemyCapsule, material);
       limb.position.y = -0.235;
-      limb.castShadow = false;
+      limb.castShadow = this.renderer.shadowMap.enabled;
       limb.userData.enemyId = id;
       pivot.add(limb);
       root.add(pivot);
@@ -581,9 +819,14 @@ export class ArenaGame {
     muzzle.rotation.x = Math.PI / 2;
     addGunBox(0, 0.103, -0.36, 0.045, 0.085, 0.035, this.material.gunDark);
     addGunBox(0, 0.145, -0.105, 0.038, 0.055, 0.04, this.material.gunAccent);
-    // Side rails and small fasteners make the silhouette read as a carbine.
+    // Side rails, optic and fasteners give the first-person carbine a clean silhouette.
     addGunBox(-0.092, 0.015, -0.09, 0.025, 0.045, 0.31, this.material.gunDark);
     addGunBox(0.092, 0.015, -0.09, 0.025, 0.045, 0.31, this.material.gunDark);
+    addGunBox(0, 0.17, -0.08, 0.055, 0.055, 0.16, this.material.gunDark);
+    addGunBox(0, 0.205, -0.08, 0.13, 0.025, 0.19, this.material.gunAccent);
+    const optic = addGunCylinder(-0.08, 0.044, 0.15, this.material.gunDark, 0.245);
+    optic.rotation.x = Math.PI / 2;
+    addGunBox(0, 0.246, -0.08, 0.06, 0.025, 0.11, this.material.accent);
     addGunBox(0.069, 0.06, 0.025, 0.025, 0.03, 0.15, this.material.accent);
 
     this.magazineGroup = new THREE.Group();
@@ -614,8 +857,27 @@ export class ArenaGame {
     this.muzzleFlash.visible = false;
     weapon.add(this.muzzleFlash);
 
-    weapon.scale.setScalar(0.88);
-    weapon.position.set(0.33, -0.3, -0.66);
+    const supportArm = new THREE.Mesh(this.handCapsule, this.material.glove);
+    supportArm.position.set(-0.17, -0.245, -0.285);
+    supportArm.rotation.z = -0.62;
+    supportArm.rotation.x = 0.12;
+    weapon.add(supportArm);
+    const gripArm = new THREE.Mesh(this.handCapsule, this.material.glove);
+    gripArm.position.set(0.145, -0.255, 0.12);
+    gripArm.rotation.z = 0.46;
+    gripArm.rotation.x = -0.08;
+    weapon.add(gripArm);
+    const supportGlove = new THREE.Mesh(new THREE.DodecahedronGeometry(0.105, 0), this.material.gloveEdge);
+    supportGlove.position.set(-0.105, -0.105, -0.19);
+    supportGlove.scale.set(1.15, 0.72, 0.82);
+    weapon.add(supportGlove);
+    const gripGlove = new THREE.Mesh(new THREE.DodecahedronGeometry(0.095, 0), this.material.gloveEdge);
+    gripGlove.position.set(0.095, -0.13, 0.08);
+    gripGlove.scale.set(0.9, 0.8, 0.75);
+    weapon.add(gripGlove);
+
+    weapon.scale.setScalar(0.76);
+    weapon.position.set(0.35, -0.32, -0.64);
     weapon.rotation.set(0.01, -0.015, -0.018);
     weapon.renderOrder = 8;
   }
@@ -624,7 +886,7 @@ export class ArenaGame {
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.BufferAttribute(this.tracerPositions, 3));
     const material = new THREE.LineBasicMaterial({
-      color: 0xffd98c,
+      color: 0xa5e4ff,
       transparent: true,
       opacity: 0.72,
       depthWrite: false,
@@ -637,14 +899,43 @@ export class ArenaGame {
     this.scene.add(this.tracerLine);
   }
 
+  private createImpactEffect(): void {
+    this.hitSpark = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.15, 0),
+      new THREE.MeshBasicMaterial({ color: 0xffd27d, transparent: true, opacity: 0.95, depthWrite: false, toneMapped: false }),
+    );
+    this.hitSpark.visible = false;
+    this.hitSpark.renderOrder = 9;
+    this.scene.add(this.hitSpark);
+  }
+
   private resize(): void {
     if (this.disposed) return;
     const width = Math.max(1, this.canvas.clientWidth || window.innerWidth);
     const height = Math.max(1, this.canvas.clientHeight || window.innerHeight);
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.4));
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));
     this.renderer.setSize(width, height, false);
+  }
+
+  private getRadarContacts(): Array<{ x: number; y: number }> {
+    const radarRange = 17;
+    const rightX = Math.cos(this.yaw);
+    const rightZ = -Math.sin(this.yaw);
+    const forwardX = -Math.sin(this.yaw);
+    const forwardZ = -Math.cos(this.yaw);
+    const contacts: Array<{ x: number; y: number }> = [];
+    for (const enemy of this.enemies) {
+      if (!enemy.root.visible || enemy.state === 'DEAD' || enemy.state === 'RESPAWNING') continue;
+      const dx = enemy.root.position.x - this.playerX;
+      const dz = enemy.root.position.z - this.playerZ;
+      const right = dx * rightX + dz * rightZ;
+      const forward = dx * forwardX + dz * forwardZ;
+      if (Math.hypot(right, forward) > radarRange) continue;
+      contacts.push({ x: clamp(right / radarRange, -0.92, 0.92), y: clamp(-forward / radarRange, -0.92, 0.92) });
+    }
+    return contacts;
   }
 
   getSnapshot(): GameSnapshot {
@@ -657,7 +948,8 @@ export class ArenaGame {
       kills: this.kills,
       aiming: this.aiming,
       reloading: this.reloadTimer > 0,
-      sprinting: this.isSprinting(),
+      sprinting: this.sprinting,
+      radarContacts: this.getRadarContacts(),
     };
   }
 
@@ -724,29 +1016,25 @@ export class ArenaGame {
   }
 
   setMovementStick(x: number, y: number): void {
+    if (this.mode !== 'playing') {
+      this.moveStickX = 0;
+      this.moveStickY = 0;
+      return;
+    }
     this.moveStickX = clamp(x, -1, 1);
     this.moveStickY = clamp(y, -1, 1);
   }
 
-  setSprint(active: boolean): void {
-    this.sprintToggle = active;
-  }
-
-  toggleSprint(): void {
-    this.sprintToggle = !this.sprintToggle;
-    this.publishSnapshot(true);
-    this.playSound('ui');
-  }
-
   lookBy(deltaX: number, deltaY: number): void {
     if (this.mode !== 'playing') return;
-    const sensitivity = 0.0041;
+    const sensitivity = 0.0035;
     this.yaw -= deltaX * sensitivity;
-    this.pitch = clamp(this.pitch - deltaY * sensitivity, -1.25, 1.25);
+    this.pitch = clamp(this.pitch - deltaY * sensitivity, -1.08, 1.08);
   }
 
   pressJump(): void {
     if (this.mode !== 'playing' || !this.grounded || this.slideTimer > 0) return;
+    // Horizontal velocity is left untouched so jumps keep the player's momentum.
     this.verticalVelocity = 7.1;
     this.grounded = false;
   }
@@ -754,10 +1042,17 @@ export class ArenaGame {
   beginSlide(): void {
     if (this.mode !== 'playing' || !this.grounded || this.slideTimer > 0 || this.slideCooldown > 0) return;
     const input = this.readMovementInput();
-    if (input.y > -0.2) return;
-    this.slideDirection.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
-    this.slideTimer = 0.66;
-    this.slideCooldown = 1.38;
+    const forwardIntent = Math.max(0, -input.y);
+    const forwardSpeed = this.velocityX * -Math.sin(this.yaw) + this.velocityZ * -Math.cos(this.yaw);
+    if (forwardIntent < 0.28 || (forwardSpeed < 1.05 && forwardIntent < 0.85)) return;
+
+    this.forwardVector.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+    this.rightVector.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
+    this.slideDirection.copy(this.rightVector).multiplyScalar(input.x);
+    this.slideDirection.addScaledVector(this.forwardVector, -input.y).normalize();
+    this.slideSpeed = clamp(Math.max(forwardSpeed, 5.4), 5.4, SPRINT_SPEED);
+    this.slideTimer = SLIDE_DURATION;
+    this.slideCooldown = SLIDE_COOLDOWN;
     this.aiming = false;
     this.publishSnapshot(true);
   }
@@ -773,14 +1068,14 @@ export class ArenaGame {
   }
 
   toggleAim(): void {
-    if (this.mode !== 'playing') return;
+    if (this.mode !== 'playing' || this.slideTimer > 0) return;
     this.aiming = !this.aiming;
     this.publishSnapshot(true);
     this.playSound('ui');
   }
 
   setAiming(active: boolean): void {
-    if (this.mode === 'playing') {
+    if (this.mode === 'playing' && (!active || this.slideTimer <= 0)) {
       this.aiming = active;
       this.publishSnapshot(true);
     }
@@ -878,16 +1173,19 @@ export class ArenaGame {
   private frame = (now: number): void => {
     if (this.disposed) return;
     this.rafId = window.requestAnimationFrame(this.frame);
-    const delta = Math.min(0.05, Math.max(0, (now - this.lastFrameAt) / 1000));
+    // Keep motion steps stable while advancing timers in real time on slower devices.
+    const elapsed = Math.max(0, (now - this.lastFrameAt) / 1000);
+    const delta = Math.min(0.1, elapsed);
+    const timerDelta = Math.min(0.25, elapsed);
     this.lastFrameAt = now;
 
     if (document.hidden || this.webglContextLost) return;
     if (this.mode === 'playing') {
-      this.updatePlayer(delta);
-      this.updateEnemies(delta);
-      this.updateWeapon(delta);
-      this.updateEffects(delta);
-      this.snapshotTimer += delta;
+      this.updatePlayer(delta, timerDelta);
+      this.updateEnemies(delta, timerDelta);
+      this.updateWeapon(delta, timerDelta);
+      this.updateEffects(timerDelta);
+      this.snapshotTimer += timerDelta;
       if (this.snapshotTimer >= 0.16) {
         this.snapshotTimer = 0;
         this.publishSnapshot(false);
@@ -900,32 +1198,47 @@ export class ArenaGame {
     this.renderer.render(this.scene, this.camera);
   };
 
-  private updatePlayer(delta: number): void {
-    this.elapsedTime += delta;
-    this.slideCooldown = Math.max(0, this.slideCooldown - delta);
-    this.slideTimer = Math.max(0, this.slideTimer - delta);
-    this.damageFlashTimer = Math.max(0, this.damageFlashTimer - delta);
-    this.shotCooldown = Math.max(0, this.shotCooldown - delta);
-    this.muzzleTimer = Math.max(0, this.muzzleTimer - delta);
+  private updatePlayer(delta: number, timerDelta: number): void {
+    this.elapsedTime += timerDelta;
+    this.slideCooldown = Math.max(0, this.slideCooldown - timerDelta);
+    this.slideTimer = Math.max(0, this.slideTimer - timerDelta);
+    this.damageFlashTimer = Math.max(0, this.damageFlashTimer - timerDelta);
 
     const input = this.readMovementInput();
+    const inputMagnitude = Math.hypot(input.x, input.y);
+    const activeMagnitude = clamp((inputMagnitude - JOYSTICK_DEAD_ZONE) / (1 - JOYSTICK_DEAD_ZONE), 0, 1);
+    const throttle = activeMagnitude > 0 ? 0.16 + 0.84 * Math.pow(activeMagnitude, 0.72) : 0;
+    const forwardIntent = clamp(-input.y, 0, 1);
     const sliding = this.slideTimer > 0;
-    const sprinting = this.isSprinting() && input.lengthSq() > 0.02 && !this.aiming && !sliding;
-    const speed = sliding ? 8.25 : sprinting ? 6.75 : this.aiming ? 3.05 : 4.35;
+    const manualSprint = (this.keyState.has('ShiftLeft') || this.keyState.has('ShiftRight'))
+      && forwardIntent > 0.2 && activeMagnitude > 0.08;
+    const autoSprint = forwardIntent >= SPRINT_THRESHOLD && activeMagnitude >= 0.78;
+    this.sprinting = !sliding && !this.aiming && (manualSprint || autoSprint);
 
+    this.forwardVector.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
+    this.rightVector.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
     if (sliding) {
-      this.wishDirection.copy(this.slideDirection).multiplyScalar(speed);
+      if (inputMagnitude > JOYSTICK_DEAD_ZONE) {
+        this.wishDirection.copy(this.rightVector).multiplyScalar(input.x);
+        this.wishDirection.addScaledVector(this.forwardVector, -input.y);
+        if (this.wishDirection.lengthSq() > 0.001) {
+          this.wishDirection.normalize();
+          this.slideDirection.lerp(this.wishDirection, 1 - Math.exp(-1.7 * delta)).normalize();
+        }
+      }
+      this.wishDirection.copy(this.slideDirection).multiplyScalar(this.slideSpeed);
     } else {
-      const forwardAmount = -input.y;
-      this.forwardVector.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw));
-      this.rightVector.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
       this.wishDirection.copy(this.rightVector).multiplyScalar(input.x);
-      this.wishDirection.addScaledVector(this.forwardVector, forwardAmount);
-      if (this.wishDirection.lengthSq() > 1) this.wishDirection.normalize();
-      this.wishDirection.multiplyScalar(speed);
+      this.wishDirection.addScaledVector(this.forwardVector, -input.y);
+      if (this.wishDirection.lengthSq() > 0.001) this.wishDirection.normalize();
+      const sprintBlend = manualSprint ? 1 : clamp((forwardIntent - 0.76) / (1 - 0.76), 0, 1);
+      const topSpeed = this.aiming
+        ? AIM_SPEED
+        : WALK_SPEED + (SPRINT_SPEED - WALK_SPEED) * sprintBlend;
+      this.wishDirection.multiplyScalar(topSpeed * throttle);
     }
 
-    const response = input.lengthSq() > 0.01 || sliding ? 13 : 10;
+    const response = sliding ? 11 : inputMagnitude > JOYSTICK_DEAD_ZONE ? 16 : 12;
     this.velocityX = damp(this.velocityX, this.wishDirection.x, response, delta);
     this.velocityZ = damp(this.velocityZ, this.wishDirection.z, response, delta);
     this.movePlayer(this.velocityX * delta, this.velocityZ * delta);
@@ -940,20 +1253,19 @@ export class ArenaGame {
       }
     }
 
-    const moveMagnitude = Math.min(1, Math.hypot(this.velocityX, this.velocityZ) / 5);
-    const lowHeight = sliding ? 1.02 : 1.64;
-    this.targetEyeHeight = lowHeight;
+    const moveMagnitude = Math.min(1, Math.hypot(this.velocityX, this.velocityZ) / SPRINT_SPEED);
+    this.targetEyeHeight = sliding ? 1.02 : 1.64;
     this.eyeHeight = damp(this.eyeHeight, this.targetEyeHeight, 13, delta);
     this.camera.position.set(this.playerX, this.feetY + this.eyeHeight, this.playerZ);
     this.camera.rotation.order = 'YXZ';
     this.camera.rotation.set(this.pitch, this.yaw, 0, 'YXZ');
 
-    const targetFov = this.aiming ? 52 : 76;
+    const targetFov = this.aiming ? 50 : 76;
     const oldFov = this.camera.fov;
-    this.camera.fov = damp(this.camera.fov, targetFov, 8, delta);
+    this.camera.fov = damp(this.camera.fov, targetFov, 8.5, delta);
     if (Math.abs(oldFov - this.camera.fov) > 0.02) this.camera.updateProjectionMatrix();
 
-    const cadence = sprinting ? 13 : 9;
+    const cadence = this.sprinting ? 13 : 9;
     this.walkPhase += delta * cadence * moveMagnitude;
   }
 
@@ -970,19 +1282,28 @@ export class ArenaGame {
   }
 
   private isSprinting(): boolean {
-    return this.sprintToggle || this.keyState.has('ShiftLeft') || this.keyState.has('ShiftRight');
+    return this.sprinting;
   }
 
   private movePlayer(deltaX: number, deltaZ: number): void {
-    if (this.canOccupy(this.playerX + deltaX, this.playerZ, PLAYER_RADIUS, true)) {
-      this.playerX += deltaX;
-    } else {
-      this.velocityX = 0;
-    }
-    if (this.canOccupy(this.playerX, this.playerZ + deltaZ, PLAYER_RADIUS, true)) {
-      this.playerZ += deltaZ;
-    } else {
-      this.velocityZ = 0;
+    const steps = Math.max(1, Math.ceil(Math.max(Math.abs(deltaX), Math.abs(deltaZ)) / 0.2));
+    const stepX = deltaX / steps;
+    const stepZ = deltaZ / steps;
+    for (let index = 0; index < steps; index += 1) {
+      if (stepX !== 0) {
+        if (this.canOccupy(this.playerX + stepX, this.playerZ, PLAYER_RADIUS, true)) {
+          this.playerX += stepX;
+        } else {
+          this.velocityX = 0;
+        }
+      }
+      if (stepZ !== 0) {
+        if (this.canOccupy(this.playerX, this.playerZ + stepZ, PLAYER_RADIUS, true)) {
+          this.playerZ += stepZ;
+        } else {
+          this.velocityZ = 0;
+        }
+      }
     }
   }
 
@@ -1008,10 +1329,10 @@ export class ArenaGame {
     return true;
   }
 
-  private updateEnemies(delta: number): void {
+  private updateEnemies(delta: number, timerDelta: number): void {
     for (const enemy of this.enemies) {
       if (enemy.state === 'DEAD') {
-        enemy.stateTimer -= delta;
+        enemy.stateTimer -= timerDelta;
         if (enemy.stateTimer <= 0) {
           enemy.state = 'RESPAWNING';
           enemy.stateTimer = 1.15;
@@ -1020,13 +1341,13 @@ export class ArenaGame {
         continue;
       }
       if (enemy.state === 'RESPAWNING') {
-        enemy.stateTimer -= delta;
+        enemy.stateTimer -= timerDelta;
         if (enemy.stateTimer <= 0) this.respawnEnemy(enemy);
         continue;
       }
 
       if (enemy.hurtTimer > 0) {
-        enemy.hurtTimer -= delta;
+        enemy.hurtTimer -= timerDelta;
         if (enemy.hurtTimer <= 0) {
           enemy.armorMaterial.emissive.setHex(0x000000);
           enemy.armorMaterial.emissiveIntensity = 0;
@@ -1055,7 +1376,7 @@ export class ArenaGame {
         continue;
       }
       if (enemy.state === 'DETECTING') {
-        enemy.stateTimer -= delta;
+        enemy.stateTimer -= timerDelta;
         if (enemy.stateTimer <= 0) enemy.state = 'CHASING';
         this.animateEnemy(enemy, delta, false);
         continue;
@@ -1063,7 +1384,7 @@ export class ArenaGame {
 
       if (distance <= 2.15) {
         enemy.state = 'ATTACKING';
-        enemy.attackTimer -= delta;
+        enemy.attackTimer -= timerDelta;
         if (enemy.attackTimer <= 0) {
           enemy.attackTimer = 1.12;
           this.damagePlayer(10);
@@ -1122,10 +1443,11 @@ export class ArenaGame {
     enemy.root.position.y = walking ? Math.abs(Math.sin(enemy.walkPhase * 2)) * 0.025 : 0;
   }
 
-  private damageEnemy(enemyId: number): void {
+  private damageEnemy(enemyId: number, impactPoint?: THREE.Vector3): void {
     const enemy = this.enemies[enemyId];
     if (!enemy || enemy.state === 'DEAD' || enemy.state === 'RESPAWNING') return;
     const hit = this.raycaster.intersectObjects(enemy.hitMeshes, false)[0];
+    if (impactPoint) this.showHitSpark(impactPoint);
     const isHeadshot = hit?.object.position.y > 1.65;
     const damage = isHeadshot ? 50 : 36;
     enemy.hp = Math.max(0, enemy.hp - damage);
@@ -1215,13 +1537,22 @@ export class ArenaGame {
     let endpoint: THREE.Vector3;
     if (hit) {
       const id = hit.object.userData.enemyId as number | undefined;
-      if (typeof id === 'number') this.damageEnemy(id);
+      if (typeof id === 'number') this.damageEnemy(id, hit.point);
       endpoint = hit.point.clone();
     } else {
       endpoint = this.raycaster.ray.origin.clone().addScaledVector(this.raycaster.ray.direction, 27);
     }
     this.showTracer(endpoint);
     this.publishSnapshot(true);
+  }
+
+  private showHitSpark(point: THREE.Vector3): void {
+    this.hitSpark.position.copy(point).addScaledVector(this.raycaster.ray.direction, 0.018);
+    this.hitSpark.quaternion.copy(this.camera.quaternion);
+    this.hitSpark.scale.setScalar(1);
+    this.hitSpark.material.opacity = 0.95;
+    this.hitSpark.visible = true;
+    this.hitSparkTimer = 0.13;
   }
 
   private showTracer(endpoint: THREE.Vector3): void {
@@ -1240,11 +1571,13 @@ export class ArenaGame {
     this.tracerTimer = 0.065;
   }
 
-  private updateWeapon(delta: number): void {
+  private updateWeapon(delta: number, timerDelta: number): void {
+    this.shotCooldown = Math.max(0, this.shotCooldown - timerDelta);
+    this.muzzleTimer = Math.max(0, this.muzzleTimer - timerDelta);
     if (this.fireHeld && this.reloadTimer <= 0 && this.shotCooldown <= 0) this.tryShoot();
 
     if (this.reloadTimer > 0) {
-      this.reloadTimer = Math.max(0, this.reloadTimer - delta);
+      this.reloadTimer = Math.max(0, this.reloadTimer - timerDelta);
       if (this.reloadTimer === 0) {
         const needed = MAGAZINE_SIZE - this.ammo;
         const loaded = Math.min(needed, this.reserveAmmo);
@@ -1311,11 +1644,18 @@ export class ArenaGame {
     this.muzzleFlash.scale.setScalar(1);
   }
 
-  private updateEffects(delta: number): void {
+  private updateEffects(timerDelta: number): void {
     if (this.tracerTimer > 0) {
-      this.tracerTimer = Math.max(0, this.tracerTimer - delta);
+      this.tracerTimer = Math.max(0, this.tracerTimer - timerDelta);
       this.tracerLine.material.opacity = Math.min(0.72, this.tracerTimer / 0.065 * 0.72);
       if (this.tracerTimer <= 0) this.tracerLine.visible = false;
+    }
+    if (this.hitSparkTimer > 0) {
+      this.hitSparkTimer = Math.max(0, this.hitSparkTimer - timerDelta);
+      const progress = this.hitSparkTimer / 0.13;
+      this.hitSpark.material.opacity = progress * 0.95;
+      this.hitSpark.scale.setScalar(0.45 + (1 - progress) * 0.8);
+      if (this.hitSparkTimer <= 0) this.hitSpark.visible = false;
     }
   }
 
@@ -1325,8 +1665,9 @@ export class ArenaGame {
     this.moveStickY = 0;
     this.fireHeld = false;
     this.mouseLooking = false;
-    this.sprintToggle = false;
+    this.sprinting = false;
     this.aiming = false;
+    this.slideTimer = 0;
     this.velocityX *= 0.25;
     this.velocityZ *= 0.25;
   }
@@ -1342,6 +1683,7 @@ export class ArenaGame {
       snapshot.aiming,
       snapshot.reloading,
       snapshot.sprinting,
+      snapshot.radarContacts.map((contact) => `${contact.x.toFixed(2)},${contact.y.toFixed(2)}`).join(';'),
     ].join('|');
     if (!force && key === this.lastSnapshotKey) return;
     this.lastSnapshotKey = key;
@@ -1381,6 +1723,7 @@ export class ArenaGame {
     for (const geometry of geometries) geometry.dispose();
     for (const material of materials) material.dispose();
     for (const material of Object.values(this.material)) material.dispose();
+    if (this.scene.background instanceof THREE.Texture) this.scene.background.dispose();
     this.renderer.dispose();
     this.soundManager.dispose();
   }

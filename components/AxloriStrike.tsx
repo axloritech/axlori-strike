@@ -13,6 +13,7 @@ const INITIAL_SNAPSHOT: GameSnapshot = {
   aiming: false,
   reloading: false,
   sprinting: false,
+  radarContacts: [],
 };
 
 type Point = { x: number; y: number };
@@ -32,6 +33,7 @@ export default function AxloriStrike() {
   const [hitVisible, setHitVisible] = useState(false);
   const [hurtVisible, setHurtVisible] = useState(false);
   const [killToast, setKillToast] = useState(false);
+  const [firePressed, setFirePressed] = useState(false);
   const [portraitTouch, setPortraitTouch] = useState(false);
   const [gameReady, setGameReady] = useState(false);
   const [gameError, setGameError] = useState('');
@@ -49,6 +51,7 @@ export default function AxloriStrike() {
     if (event.type === 'hit') showTimedFlag(setHitVisible, 125);
     if (event.type === 'damage') showTimedFlag(setHurtVisible, 330);
     if (event.type === 'kill') showTimedFlag(setKillToast, 1050);
+    if (event.type === 'empty') setFirePressed(false);
   }, [showTimedFlag]);
 
   useEffect(() => {
@@ -178,6 +181,16 @@ export default function AxloriStrike() {
     event.stopPropagation();
   };
 
+  const activateAction = (event: React.PointerEvent<HTMLButtonElement>, action: () => void) => {
+    stopPointer(event);
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    action();
+  };
+
+  const activateKeyboardAction = (event: React.MouseEvent<HTMLButtonElement>, action: () => void) => {
+    if (event.detail === 0) action();
+  };
+
   const healthPercent = Math.max(0, Math.min(100, (snapshot.health / snapshot.maxHealth) * 100));
   const mobileControlsEnabled = snapshot.mode === 'playing';
 
@@ -190,32 +203,48 @@ export default function AxloriStrike() {
       {snapshot.mode === 'playing' && (
         <>
           <section className="hud" aria-label="Game status">
-            <div className={`health-card${snapshot.health <= 32 ? ' is-critical' : ''}`}>
-              <div className="hud-caption"><span className="status-dot" /> OPERATIVE STATUS</div>
-              <div className="health-reading">
-                <span>VITALS</span>
-                <strong>{snapshot.health}<small> / {snapshot.maxHealth}</small></strong>
+            <div className="hud-left-group">
+              <div className="radar" role="img" aria-label={`${snapshot.radarContacts.length} hostiles nearby`}>
+                <span className="radar-ring radar-ring-outer" />
+                <span className="radar-ring radar-ring-inner" />
+                <span className="radar-axis radar-axis-x" />
+                <span className="radar-axis radar-axis-y" />
+                <span className="radar-sweep" />
+                <i className="radar-player" />
+                {snapshot.radarContacts.map((contact, index) => (
+                  <i
+                    className="radar-contact"
+                    key={`${index}-${contact.x.toFixed(2)}-${contact.y.toFixed(2)}`}
+                    style={{ left: `calc(50% + ${contact.x * 36}px)`, top: `calc(50% + ${contact.y * 36}px)` }}
+                  />
+                ))}
               </div>
-              <div className="health-track"><i style={{ width: `${healthPercent}%` }} /></div>
+              <div className="kill-card">
+                <span className="hud-caption">KILLS</span>
+                <strong>{String(snapshot.kills).padStart(2, '0')}</strong>
+              </div>
             </div>
 
-            <div className="hud-right-top">
-              <div className="kill-card">
-                <span className="hud-caption">TARGETS DOWN</span>
-                <strong>{String(snapshot.kills).padStart(2, '0')}</strong>
+            <div className="hud-right-group">
+              <div className={`health-card${snapshot.health <= 32 ? ' is-critical' : ''}`} aria-label={`Health ${snapshot.health} of ${snapshot.maxHealth}`}>
+                <div className="health-topline">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.8 4.9a5.2 5.2 0 0 0-7.4 0L12 6.2l-1.4-1.3a5.2 5.2 0 0 0-7.4 7.4l1.4 1.4L12 21l7.4-7.3 1.4-1.4a5.2 5.2 0 0 0 0-7.4Z" /></svg>
+                  <span>HP</span>
+                  <strong>{snapshot.health}<small> / {snapshot.maxHealth}</small></strong>
+                </div>
+                <div className="health-track"><i style={{ width: `${healthPercent}%` }} /></div>
               </div>
               <button className="hud-icon-button sound-hud" onClick={toggleSound} aria-label={soundEnabled ? 'Mute sound' : 'Enable sound'}>
                 <span className={`sound-glyph${soundEnabled ? '' : ' is-muted'}`} aria-hidden="true" />
-                <span className="hud-button-label">{soundEnabled ? 'SOUND' : 'MUTED'}</span>
               </button>
               <button className="hud-icon-button pause-hud" onClick={() => gameRef.current?.pause()} aria-label="Pause game">
                 <span className="pause-glyph" aria-hidden="true"><i /><i /></span>
-                <span className="hud-button-label">PAUSE</span>
               </button>
             </div>
 
             <div className="ammo-card" aria-live="polite">
               <div className="ammo-status">{snapshot.reloading ? 'RELOADING' : 'AX-7 / AUTO'}</div>
+              <svg className="ammo-glyph" viewBox="0 0 48 18" aria-hidden="true"><path d="M2 7h18l5-4h10l3 3h8v4h-7l-4 5H21l-3-4H2zm25-1 4 2-4 2h-4V6z" /><path d="M10 13v3M13 13v3M37 4v2" /></svg>
               <div className="ammo-reading"><strong>{String(snapshot.ammo).padStart(2, '0')}</strong><span> / {String(snapshot.reserve).padStart(2, '0')}</span></div>
               <div className="ammo-label">MAGAZINE <b>·</b> RESERVE</div>
             </div>
@@ -244,7 +273,7 @@ export default function AxloriStrike() {
               ref={joystickRef}
               className="virtual-joystick touch-control"
               role="application"
-              aria-label="Movement joystick. Drag to move."
+              aria-label="Movement joystick. Drag to move; push forward to sprint."
               onPointerDown={onJoystickPointerDown}
               onPointerMove={onJoystickPointerMove}
               onPointerUp={endJoystick}
@@ -254,58 +283,85 @@ export default function AxloriStrike() {
               <span className="joystick-ring" />
               <span className="joystick-cross-x" />
               <span className="joystick-cross-y" />
+              <i className="joystick-chevron joystick-chevron-up" />
+              <i className="joystick-chevron joystick-chevron-right" />
+              <i className="joystick-chevron joystick-chevron-down" />
+              <i className="joystick-chevron joystick-chevron-left" />
               <span className="joystick-label">MOVE</span>
-              <span className="joystick-knob" style={{ transform: `translate(calc(-50% + ${stickPoint.x * 31}px), calc(-50% + ${stickPoint.y * 31}px))` }} />
+              <span className="joystick-knob" style={{ transform: `translate(calc(-50% + ${stickPoint.x * 70}%), calc(-50% + ${stickPoint.y * 70}%))` }} />
             </div>
-            <button
-              className={`sprint-control touch-control${snapshot.sprinting ? ' is-active' : ''}`}
-              onPointerDown={stopPointer}
-              onClick={() => gameRef.current?.toggleSprint()}
-              aria-pressed={snapshot.sprinting}
-            >RUN</button>
+            <div className={`sprint-indicator${snapshot.sprinting ? ' is-active' : ''}`} aria-live="polite" data-testid="sprint-indicator">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.3 4.5a2 2 0 1 0-2-2 2 2 0 0 0 2 2ZM11 8l-3 4 3.2 2.1-1.1 5.4M11.2 8l4.4 2.4 2.8-.8M9.4 12l-4.2 1.6-1.7 3.1M14.2 13l3.8 3.2 2.1 3" /></svg>
+              <span>{snapshot.sprinting ? 'SPRINT ACTIVE' : 'DRAG UP TO SPRINT'}</span>
+            </div>
             <div className="action-cluster">
               <button
-                className="action-button action-slide touch-control"
-                onPointerDown={stopPointer}
-                onClick={() => gameRef.current?.beginSlide()}
-                aria-label="Slide"
-              >SLIDE</button>
-              <button
                 className={`action-button action-aim touch-control${snapshot.aiming ? ' is-active' : ''}`}
-                onPointerDown={stopPointer}
-                onClick={() => gameRef.current?.toggleAim()}
+                onPointerDown={(event) => activateAction(event, () => gameRef.current?.toggleAim())}
+                onClick={(event) => activateKeyboardAction(event, () => gameRef.current?.toggleAim())}
                 aria-pressed={snapshot.aiming}
                 aria-label="Aim down sights"
-              >AIM</button>
-              <button
-                className="action-button action-reload touch-control"
-                onPointerDown={stopPointer}
-                onClick={() => gameRef.current?.startReload()}
-                aria-label="Reload weapon"
-              >RLD</button>
-              <button
-                className="action-button action-jump touch-control"
-                onPointerDown={stopPointer}
-                onClick={() => gameRef.current?.pressJump()}
-                aria-label="Jump"
-              >JUMP</button>
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8" /><path d="M12 1v5m0 12v5M1 12h5m12 0h5M12 9v6m-3-3h6" /></svg>
+                <span>AIM</span>
+              </button>
               <button
                 className="action-button action-fire touch-control"
                 onPointerDown={(event) => {
                   stopPointer(event);
                   if (event.pointerType === 'mouse' && event.button !== 0) return;
+                  setFirePressed(true);
                   event.currentTarget.setPointerCapture(event.pointerId);
                   gameRef.current?.setFiring(true);
                 }}
                 onPointerUp={(event) => {
                   stopPointer(event);
+                  setFirePressed(false);
                   gameRef.current?.setFiring(false);
                   if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
                 }}
-                onPointerCancel={() => gameRef.current?.setFiring(false)}
-                onLostPointerCapture={() => gameRef.current?.setFiring(false)}
-                aria-label="Fire weapon"
-              ><span className="fire-core" /><b>FIRE</b></button>
+                onPointerCancel={() => {
+                  setFirePressed(false);
+                  gameRef.current?.setFiring(false);
+                }}
+                onLostPointerCapture={() => {
+                  setFirePressed(false);
+                  gameRef.current?.setFiring(false);
+                }}
+                aria-label="Hold to fire continuously"
+                data-testid="fire-button"
+                aria-pressed={firePressed}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3.4 14.3 7.9-7.9 3.7 3.7-7.9 7.9H3.4zM13 5.7l2.3-2.3 5.3 5.3-2.3 2.3M3.4 14.3l6.3 6.3M6.1 11.6l6.3 6.3" /></svg>
+                <span>FIRE</span>
+              </button>
+              <button
+                className="action-button action-jump touch-control"
+                onPointerDown={(event) => activateAction(event, () => gameRef.current?.pressJump())}
+                onClick={(event) => activateKeyboardAction(event, () => gameRef.current?.pressJump())}
+                aria-label="Jump while moving"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V4m0 0L6.5 9.5M12 4l5.5 5.5M5 21h14" /></svg>
+                <span>JUMP</span>
+              </button>
+              <button
+                className="action-button action-reload touch-control"
+                onPointerDown={(event) => activateAction(event, () => gameRef.current?.startReload())}
+                onClick={(event) => activateKeyboardAction(event, () => gameRef.current?.startReload())}
+                aria-label="Reload while moving"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 9A7 7 0 0 1 18 6l2 6M4 12l2 6a7 7 0 0 0 12-1" /></svg>
+                <span>RELOAD</span>
+              </button>
+              <button
+                className="action-button action-slide touch-control"
+                onPointerDown={(event) => activateAction(event, () => gameRef.current?.beginSlide())}
+                onClick={(event) => activateKeyboardAction(event, () => gameRef.current?.beginSlide())}
+                aria-label="Slide while moving forward"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 18 7-1 4-4 6 1M8 14l2-5 4-3m-4 3 5 2 3-2M4 21h16" /></svg>
+                <span>SLIDE</span>
+              </button>
             </div>
           </div>
         </>
@@ -337,7 +393,7 @@ export default function AxloriStrike() {
                   <span>LEFT STICK <i>·</i> MOVE</span>
                   <span>DRAG RIGHT SIDE <i>·</i> LOOK</span>
                   <span>FIRE, AIM, JUMP, SLIDE</span>
-                  <span>RUN <i>·</i> SPRINT TOGGLE</span>
+                  <span>PUSH UP <i>·</i> AUTO SPRINT</span>
                 </div>
               </div>
             </div>
